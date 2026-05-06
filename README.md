@@ -334,7 +334,7 @@ See `requirements.txt` for all dependencies. Key packages:
 
 ## Author
 
-Federated IDS Project - 2024
+Shailesh Kumar Sharma
 
 ## License
 
