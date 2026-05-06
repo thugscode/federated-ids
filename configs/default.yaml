@@ -1,0 +1,80 @@
+# Federated Learning Experiment Configuration
+# Override any setting from command line: python experiments/run.py data.partition=day
+
+data:
+  # Data partition strategy: "iid" | "day" | "family"
+  # - iid: Random shuffle, equal split (heterogeneity ≈ 0.0068)
+  # - day: Temporal grouping by day (heterogeneity ≈ 0.0122)
+  # - family: Attack family specialization (heterogeneity ≈ 0.0785)
+  partition: "iid"
+  
+  # Number of clients participating in federation
+  n_clients: 5
+  
+  # Random seed for reproducibility
+  seed: 42
+  
+  # Data paths (relative to project root)
+  raw_data_dir: "data/raw"
+  processed_data_dir: "data/processed"
+
+training:
+  # Local epochs per client per round
+  local_epochs: 3
+  
+  # Batch size for local training
+  batch_size: 512
+  
+  # Learning rate for Adam optimizer
+  learning_rate: 0.001
+  
+  # Number of federated rounds
+  num_rounds: 50
+  
+  # Device configuration
+  device: "cpu"  # "cpu" | "cuda" | "auto"
+
+strategy:
+  # Aggregation strategy: "fedavg" | "fedprox" | "fednova" | "dpfedavg"
+  name: "fedavg"
+  
+  # FedProx: proximal term coefficient (default 0.01)
+  # Reduces to FedAvg when mu=0. Helps with heterogeneous networks.
+  mu: 0.01
+  
+  # Differential Privacy (DPFedAvg only)
+  # Max L2 norm for gradient clipping
+  max_grad_norm: 1.0
+  
+  # Noise multiplier for Gaussian noise (relative to clipping threshold)
+  # Higher = stronger privacy but worse accuracy
+  noise_multiplier: 1.0
+  
+  # Target delta for RDP accounting (DP only)
+  target_delta: 1e-5
+  
+  # FedNova: momentum coefficient for aggregation
+  momentum: 0.0
+  
+  # FedNova: adaptive learning rates per client
+  adapt_lr: true
+
+# Experiment metadata
+experiment:
+  # Name for this experiment run
+  name: "federated_ids_default"
+  
+  # Description
+  description: "Federated learning on CICIDS2017 intrusion detection dataset"
+  
+  # Output directory for results
+  output_dir: "results/metrics"
+  
+  # Enable verbose logging
+  verbose: true
+  
+  # Save model checkpoints
+  save_checkpoints: false
+  
+  # Random seed for reproducibility (overrides data.seed)
+  seed: 42

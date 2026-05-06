@@ -1,221 +1,301 @@
 """
-Federated learning server implementation.
+Flower federated learning server for intrusion detection.
 
-Handles server-side aggregation and model coordination.
+Orchestrates federated learning rounds using Flower framework.
+Implements FedAvg strategy with metrics aggregation and logging.
 """
 
-import numpy as np
-from typing import List, Tuple, Dict
+import flwr as fl
+from flwr.server.strategy import FedAvg
+from flwr.common import Metrics, FitRes, Parameters
+from typing import List, Tuple, Dict, Optional
 import logging
 import json
 from pathlib import Path
+import numpy as np
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class FederatedServer:
-    """Federated learning server."""
+def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
+    """
+    Aggregate metrics from clients using weighted averaging.
     
-    def __init__(self, model, strategy, num_clients: int):
+    Args:
+        metrics: List of (num_examples, metrics_dict) tuples from clients
+        
+    Returns:
+        Aggregated metrics dictionary
+    """
+    if not metrics:
+        return {}
+    
+    # Extract total examples and metrics
+    total_examples = sum(num_examples for num_examples, _ in metrics)
+    
+    # Initialize aggregated metrics
+    aggregated = {
+        "loss": 0.0,
+        "accuracy": 0.0,
+        "macro_f1": 0.0,
+        "weighted_f1": 0.0,
+    }
+    
+    # Per-class F1 scores aggregation
+    per_class_f1_sums = {}
+    
+    # Aggregate each metric
+    for num_examples, client_metrics in metrics:
+        weight = num_examples / total_examples if total_examples > 0 else 0
+        
+        # Weighted aggregation
+        if "loss" in client_metrics:
+            aggregated["loss"] += weight * client_metrics["loss"]
+        if "accuracy" in client_metrics:
+            aggregated["accuracy"] += weight * client_metrics["accuracy"]
+        if "macro_f1" in client_metrics:
+            aggregated["macro_f1"] += weight * client_metrics["macro_f1"]
+        if "weighted_f1" in client_metrics:
+            aggregated["weighted_f1"] += weight * client_metrics["weighted_f1"]
+        
+        # Per-class F1 aggregation
+        for key, value in client_metrics.items():
+            if key.startswith("f1_class_"):
+                if key not in per_class_f1_sums:
+                    per_class_f1_sums[key] = 0.0
+                per_class_f1_sums[key] += weight * value
+    
+    # Add per-class F1 to aggregated metrics
+    aggregated.update(per_class_f1_sums)
+    
+    return aggregated
+
+
+def create_fedavg_strategy(
+    min_fit_clients: int = 5,
+    min_available_clients: int = 5,
+    fraction_fit: float = 1.0,
+    fraction_evaluate: float = 1.0,
+    min_evaluate_clients: int = 5,
+    num_rounds: int = 50
+) -> FedAvg:
+    """
+    Create a FedAvg strategy with specified configuration.
+    
+    Args:
+        min_fit_clients: Minimum clients to participate in training
+        min_available_clients: Minimum clients available
+        fraction_fit: Fraction of clients to participate in training
+        fraction_evaluate: Fraction of clients to participate in evaluation
+        min_evaluate_clients: Minimum clients for evaluation
+        num_rounds: Number of federated rounds
+        
+    Returns:
+        Configured FedAvg strategy
+    """
+    
+    strategy = FedAvg(
+        fraction_fit=fraction_fit,
+        fraction_evaluate=fraction_evaluate,
+        min_fit_clients=min_fit_clients,
+        min_evaluate_clients=min_evaluate_clients,
+        min_available_clients=min_available_clients,
+        evaluate_metrics_aggregation_fn=weighted_average,
+        initial_parameters=None,  # Will be set by server
+        fit_metrics_aggregation_fn=weighted_average,
+    )
+    
+    logger.info("FedAvg strategy created:")
+    logger.info(f"  Fraction fit: {fraction_fit}")
+    logger.info(f"  Min fit clients: {min_fit_clients}")
+    logger.info(f"  Min available clients: {min_available_clients}")
+    logger.info(f"  Evaluate metrics aggregation: Yes")
+    
+    return strategy
+
+
+class MetricsLogger:
+    """
+    Logger for tracking federated learning metrics across rounds.
+    """
+    
+    def __init__(self, output_dir: Path = Path("results/metrics")):
         """
-        Initialize server.
+        Initialize metrics logger.
         
         Args:
-            model: Initial model
-            strategy: Aggregation strategy
-            num_clients: Number of clients
+            output_dir: Directory to save metrics
         """
-        self.model = model
-        self.strategy = strategy
-        self.num_clients = num_clients
-        self.round = 0
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
         self.history = {
-            "loss": [],
-            "accuracy": [],
-            "client_metrics": []
+            "timestamp": datetime.now().isoformat(),
+            "rounds": []
         }
         
-        logger.info(f"Server initialized with {num_clients} clients")
-        logger.info(f"Aggregation strategy: {strategy.__class__.__name__}")
+        logger.info(f"MetricsLogger initialized - output dir: {self.output_dir}")
     
-    def aggregate_models(self, client_models: List[Tuple[List, List]], 
-                        client_sizes: List[int]) -> Tuple[List, List]:
+    def log_round(self, round_num: int, metrics: Dict, fit_metrics: Dict = None):
         """
-        Aggregate client models using the selected strategy.
+        Log metrics for a single round.
         
         Args:
-            client_models: List of (weights, biases) tuples from clients
-            client_sizes: List of client dataset sizes
-            
-        Returns:
-            Aggregated (weights, biases)
+            round_num: Current round number
+            metrics: Evaluation metrics dict
+            fit_metrics: Optional training metrics dict
         """
-        aggregated_weights, aggregated_biases = self.strategy.aggregate(client_models, client_sizes)
-        return aggregated_weights, aggregated_biases
-    
-    def broadcast_model(self) -> Tuple[List, List]:
-        """
-        Broadcast current model to clients.
-        
-        Returns:
-            Current (weights, biases)
-        """
-        weights, biases = self.model.get_weights()
-        logger.info(f"Broadcasting global model (Round {self.round})")
-        return weights, biases
-    
-    def federated_round(self, clients, fraction: float = 1.0, 
-                       num_local_epochs: int = 5) -> Dict:
-        """
-        Execute one federated learning round.
-        
-        Args:
-            clients: List of FederatedClient objects
-            fraction: Fraction of clients to participate
-            num_local_epochs: Number of local training epochs
-            
-        Returns:
-            Dictionary with round statistics
-        """
-        self.round += 1
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Federated Round {self.round}")
-        logger.info(f"{'='*60}")
-        
-        # Select clients
-        num_selected = max(1, int(len(clients) * fraction))
-        selected_clients = np.random.choice(clients, num_selected, replace=False)
-        logger.info(f"Selected {num_selected}/{len(clients)} clients")
-        
-        # Broadcast model
-        global_weights, global_biases = self.broadcast_model()
-        
-        # Local training
-        client_models = []
-        client_sizes = []
-        round_metrics = []
-        
-        for client in selected_clients:
-            # Set global weights
-            client.set_weights(global_weights, global_biases)
-            
-            # Local update
-            weights, biases, loss = client.local_update(num_epochs=num_local_epochs)
-            client_models.append((weights, biases))
-            client_sizes.append(client.get_dataset_size())
-            
-            # Evaluate
-            metrics = client.evaluate()
-            metrics["client_id"] = client.client_id
-            metrics["loss"] = loss
-            round_metrics.append(metrics)
-            
-            logger.info(f"  Client {client.client_id}: Loss={loss:.4f}, Acc={metrics.get('accuracy', 0):.4f}")
-        
-        # Aggregate models
-        aggregated_weights, aggregated_biases = self.aggregate_models(client_models, client_sizes)
-        self.model.set_weights(aggregated_weights, aggregated_biases)
-        
-        # Compute statistics
-        avg_loss = np.mean([m["loss"] for m in round_metrics])
-        avg_accuracy = np.mean([m["accuracy"] for m in round_metrics])
-        avg_f1 = np.mean([m["f1"] for m in round_metrics])
-        
-        logger.info(f"\nRound {self.round} Summary:")
-        logger.info(f"  Avg Loss: {avg_loss:.4f}")
-        logger.info(f"  Avg Accuracy: {avg_accuracy:.4f}")
-        logger.info(f"  Avg F1-Score: {avg_f1:.4f}")
-        
-        # Store history
-        self.history["loss"].append(avg_loss)
-        self.history["accuracy"].append(avg_accuracy)
-        self.history["client_metrics"].append(round_metrics)
-        
-        return {
-            "round": self.round,
-            "loss": avg_loss,
-            "accuracy": avg_accuracy,
-            "f1": avg_f1,
-            "num_clients": num_selected,
-            "client_metrics": round_metrics
-        }
-    
-    def evaluate_global_model(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict:
-        """
-        Evaluate global model on test set.
-        
-        Args:
-            X_test: Test features
-            y_test: Test labels
-            
-        Returns:
-            Dictionary with evaluation metrics
-        """
-        predictions = self.model.predict(X_test)
-        accuracy = np.mean(predictions == y_test)
-        
-        # Binary classification metrics
-        TP = np.sum((predictions == 1) & (y_test == 1))
-        TN = np.sum((predictions == 0) & (y_test == 0))
-        FP = np.sum((predictions == 1) & (y_test == 0))
-        FN = np.sum((predictions == 0) & (y_test == 1))
-        
-        precision = TP / (TP + FP) if (TP + FP) > 0 else 0
-        recall = TP / (TP + FN) if (TP + FN) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
-        metrics = {
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "tp": TP,
-            "tn": TN,
-            "fp": FP,
-            "fn": FN
+        round_data = {
+            "round": round_num,
+            "timestamp": datetime.now().isoformat(),
+            "eval_metrics": metrics,
         }
         
-        logger.info(f"Global model evaluation - Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
-        return metrics
-    
-    def save_checkpoint(self, output_dir: str):
-        """Save server state and model."""
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        if fit_metrics:
+            round_data["fit_metrics"] = fit_metrics
         
-        # Save history
-        with open(output_path / f"history_round_{self.round}.json", "w") as f:
-            json.dump({
-                "loss": [float(l) for l in self.history["loss"]],
-                "accuracy": [float(a) for a in self.history["accuracy"]]
-            }, f, indent=2)
+        self.history["rounds"].append(round_data)
         
-        logger.info(f"Checkpoint saved to {output_path}")
+        # Save to JSON after each round
+        self.save()
+        
+        # Log to console
+        logger.info(f"Round {round_num} completed:")
+        if metrics:
+            loss = metrics.get('loss', None)
+            if loss is not None:
+                logger.info(f"  Eval Loss: {loss:.4f}")
+            
+            accuracy = metrics.get('accuracy', None)
+            if accuracy is not None:
+                logger.info(f"  Eval Accuracy: {accuracy:.4f}")
+            
+            macro_f1 = metrics.get('macro_f1', None)
+            if macro_f1 is not None:
+                logger.info(f"  Eval Macro F1: {macro_f1:.4f}")
+            
+            weighted_f1 = metrics.get('weighted_f1', None)
+            if weighted_f1 is not None:
+                logger.info(f"  Eval Weighted F1: {weighted_f1:.4f}")
     
-    def get_history(self) -> Dict:
-        """Get training history."""
-        return self.history
+    def save(self, filename: str = "federated_metrics.json"):
+        """
+        Save metrics history to JSON file.
+        
+        Args:
+            filename: Name of output file
+        """
+        output_path = self.output_dir / filename
+        with open(output_path, 'w') as f:
+            json.dump(self.history, f, indent=2)
+        
+        logger.info(f"Metrics saved to {output_path}")
+
+
+def run_server(
+    server_address: str = "0.0.0.0:8080",
+    num_rounds: int = 50,
+    min_fit_clients: int = 5,
+    min_available_clients: int = 5,
+    num_client_cpus: int = 1,
+    num_client_gpus: float = 0.0,
+):
+    """
+    Run Flower federated learning server.
     
-    def get_model(self):
-        """Get current global model."""
-        return self.model
+    Args:
+        server_address: Server address (host:port)
+        num_rounds: Number of federated rounds
+        min_fit_clients: Minimum clients for training
+        min_available_clients: Minimum available clients
+        num_client_cpus: CPU resources per client
+        num_client_gpus: GPU resources per client
+    """
     
-    def get_round(self) -> int:
-        """Get current round number."""
-        return self.round
+    # Create strategy
+    strategy = create_fedavg_strategy(
+        min_fit_clients=min_fit_clients,
+        min_available_clients=min_available_clients,
+        fraction_fit=1.0,
+        fraction_evaluate=1.0,
+        num_rounds=num_rounds
+    )
+    
+    # Initialize metrics logger
+    metrics_logger = MetricsLogger()
+    
+    # Configure server
+    config = fl.server.ServerConfig(
+        num_rounds=num_rounds,
+        round_timeout=600,
+    )
+    
+    logger.info(f"Starting Flower server on {server_address}")
+    logger.info(f"Configuration:")
+    logger.info(f"  Number of rounds: {num_rounds}")
+    logger.info(f"  Min fit clients: {min_fit_clients}")
+    logger.info(f"  Min available clients: {min_available_clients}")
+    
+    # Start server
+    fl.server.start_server(
+        server_address=server_address,
+        config=config,
+        strategy=strategy,
+    )
 
 
 if __name__ == "__main__":
-    from model import NeuralNetwork
-    from strategies import FedAvg
+    import argparse
     
-    # Create model
-    model = NeuralNetwork(input_dim=78, hidden_dims=[128, 64], output_dim=1)
+    parser = argparse.ArgumentParser(
+        description="Flower server for federated IDS learning"
+    )
+    parser.add_argument(
+        "--server_address",
+        type=str,
+        default="0.0.0.0:8080",
+        help="Server address (host:port)"
+    )
+    parser.add_argument(
+        "--num_rounds",
+        type=int,
+        default=50,
+        help="Number of federated rounds"
+    )
+    parser.add_argument(
+        "--min_fit_clients",
+        type=int,
+        default=5,
+        help="Minimum clients for training"
+    )
+    parser.add_argument(
+        "--min_available_clients",
+        type=int,
+        default=5,
+        help="Minimum available clients"
+    )
+    parser.add_argument(
+        "--num_client_cpus",
+        type=int,
+        default=1,
+        help="CPU resources per client"
+    )
+    parser.add_argument(
+        "--num_client_gpus",
+        type=float,
+        default=0.0,
+        help="GPU resources per client"
+    )
     
-    # Create strategy
-    strategy = FedAvg(num_clients=10)
+    args = parser.parse_args()
     
-    # Create server
-    server = FederatedServer(model, strategy, num_clients=10)
-    logger.info(f"Server created successfully")
+    run_server(
+        server_address=args.server_address,
+        num_rounds=args.num_rounds,
+        min_fit_clients=args.min_fit_clients,
+        min_available_clients=args.min_available_clients,
+        num_client_cpus=args.num_client_cpus,
+        num_client_gpus=args.num_client_gpus,
+    )

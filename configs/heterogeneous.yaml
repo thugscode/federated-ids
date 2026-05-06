@@ -1,0 +1,26 @@
+# High Heterogeneity (Non-IID) Configuration
+# Use this config for testing strategies on highly heterogeneous networks
+# where each client has different data distributions
+
+defaults:
+  - default
+
+data:
+  partition: "family"  # Attack family specialization (highest heterogeneity)
+  n_clients: 5
+  seed: 42
+
+training:
+  local_epochs: 5      # Longer training for heterogeneous networks
+  batch_size: 256
+  learning_rate: 0.001
+  num_rounds: 100      # More rounds for convergence
+
+# FedProx helps with heterogeneity
+strategy:
+  name: "fedprox"
+  mu: 0.01             # Proximal regularization
+
+experiment:
+  name: "heterogeneous_fedprox"
+  description: "FedProx on highly heterogeneous (attack-family) partitioned data"
