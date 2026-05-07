@@ -45,13 +45,36 @@ federated-ids/
 
 ## Setup
 
-### 1. Install Dependencies
+### Prerequisites
+- Python 3.9+ (tested on 3.13)
+- pip package manager
+
+### 1. Clone and Navigate to Project
 
 ```bash
+cd /path/to/federated-ids
+```
+
+### 2. Create and Activate Virtual Environment (Recommended)
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+
+# Activate it
+source .venv/bin/activate  # On Linux/Mac
+# or
+.venv\Scripts\activate  # On Windows
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-### 2. Prepare Data
+### 4. Prepare Data
 
 Place the 8 daily CICIDS2017 CSV files in `data/raw/`:
 ```
@@ -68,136 +91,310 @@ data/raw/
 └── friday_plus.csv
 ```
 
-### 3. Preprocess Data
-
-Run the preprocessing pipeline to clean and prepare the data:
+### 5. Preprocess Data
 
 ```bash
-python src/preprocess.py data/raw data/processed
+python src/preprocess.py
 ```
 
-This will:
-- Load all 8 CSV files and merge them
-- Remove infinite values in Flow_Bytes/s and Flow_Packets/s
-- Remove duplicate rows
+This:
+- Loads and merges all 8 CSV files
+- Removes infinite and duplicate values
+- Encodes attack types as labels
+- Scales features
+- Saves to `data/processed/`
+
+## Quick Start: Run Experiments
+
+### Option 1: Use Hydra Configuration (Recommended)
+
+All experiments use Hydra for flexible configuration management.
+
+#### Basic Usage
+
+```bash
+# Default configuration (FedAvg, IID, 5 clients, 50 rounds)
+python experiments/run.py
+
+# Override single parameter
+python experiments/run.py data.partition=day
+
+# Multiple overrides
+python experiments/run.py strategy.name=fedprox strategy.mu=0.05 training.num_rounds=100
+```
+
+#### Use Preset Configs
+
+```bash
+# High heterogeneity scenario (attack-family partition, FedProx)
+python experiments/run.py --config-name=heterogeneous
+
+# Differential privacy scenario
+python experiments/run.py --config-name=privacy
+```
+
+#### Strategy-Specific Scripts
+
+```bash
+# FedAvg baseline
+python experiments/run_fedavg.py
+
+# FedProx (heterogeneous networks)
+python experiments/run_fedprox.py data.partition=family
+
+# FedNova (non-IID data)
+python experiments/run_fednova.py strategy.momentum=0.9
+
+# DPFedAvg (differential privacy)
+python experiments/run_dp.py strategy.noise_multiplier=0.1
+```
+
+### Option 2: Configure via YAML
+
+Edit `configs/default.yaml` to customize:
+- Data partitioning (iid, day, family)
+- Number of clients (n_clients)
+- Training parameters (local_epochs, batch_size, num_rounds)
+- Strategy (fedavg, fedprox, fednova, dpfedavg)
+- Strategy-specific parameters
+
+```bash
+# Run with custom config
+python experiments/run.py --config-name=default
+```
+
+### Option 3: Use Jupyter Notebooks
+
+```bash
+# Start Jupyter
+jupyter notebook
+
+# Available notebooks in notebooks/:
+# - 01_eda.ipynb: Exploratory data analysis
+# - 02_baseline.ipynb: Baseline training
+# - 03_federation.ipynb: Federated learning demo
+# - 04_analysis.ipynb: Results analysis
+# - 05_dataset_testing.ipynb: Dataset partitioning validation
+# - 06_model_training.ipynb: Model training validation
+```
+
+## Example Workflows
+
+### Compare Strategies on Non-IID Data
+
+```bash
+# FedAvg baseline
+python experiments/run_fedavg.py data.partition=family
+
+# FedProx with regularization
+python experiments/run_fedprox.py data.partition=family strategy.mu=0.01
+
+# FedNova with momentum
+python experiments/run_fednova.py data.partition=family strategy.momentum=0.9
+
+# Results saved to results/metrics/{experiment_name}_results.json
+```
+
+### Test Privacy-Utility Tradeoff
+
+```bash
+# Strong privacy (noise_multiplier=0.1)
+python experiments/run_dp.py strategy.noise_multiplier=0.1
+
+# Moderate privacy (noise_multiplier=1.0)
+python experiments/run_dp.py strategy.noise_multiplier=1.0
+
+# Weak privacy (noise_multiplier=10.0)
+python experiments/run_dp.py strategy.noise_multiplier=10.0
+```
+
+### Custom Experiment
+
+```bash
+# Create custom config in configs/my_config.yaml
+# Then run:
+python experiments/run.py --config-name=my_config
+```
+
+## Results
+
+Experiment results are saved to `results/metrics/`:
+- JSON files with full configuration
+- Round-by-round metrics (loss, accuracy, F1 scores)
+- Final performance summary
+- Privacy metrics for DPFedAvg (epsilon, delta)
+
+## Architecture & Modules
+
+### Core Modules (src/)
+
+#### `preprocess.py`
+Data preprocessing pipeline with 7 tasks:
+- Load and merge 8 daily CICIDS2017 CSV files
+- Remove infinite values (Flow_Bytes/s, Flow_Packets/s)
+- Remove duplicates
 - Parse and unify timestamps
-- Encode attack types as integer labels
-- Apply standard scaling to numeric features
-- Save processed data as parquet files
+- Encode attack types as integer labels (0-14)
+- Standard scale numeric features
+- Save to parquet format for fast loading
 
-## Quick Start
+**Usage**: `python src/preprocess.py`
 
-### Option 1: Run Experiments from Command Line
+#### `dataset.py`
+Dataset partitioning for federated learning scenarios:
+- `partition_iid()`: Random shuffle + equal split (heterogeneity ≈ 0.0068)
+- `partition_by_day()`: Temporal grouping with day-specific attack rates (heterogeneity ≈ 0.0122)
+- `partition_by_attack_family()`: Specialize clients by attack type (heterogeneity ≈ 0.0785)
+- `compute_emd()`: Measure data heterogeneity via Wasserstein distance
+- `analyze_partitions()`: Statistics on partition quality
 
-#### Baseline (Centralized Learning)
+**Heterogeneity Measurement**: Pairwise Earth Mover Distance (EMD) between client label distributions
+
+#### `model.py`
+PyTorch neural network for IDS classification:
+- `IDSNet`: 77 → 128 → 64 → 32 → 15 (with BatchNorm, ReLU, Dropout)
+- `train_one_epoch()`: Local training with Adam optimizer
+- `evaluate()`: Comprehensive metrics (accuracy, macro F1, weighted F1, per-class F1)
+- `print_evaluation_metrics()`: Pretty-print results
+
+**Architecture**: 77 input features → 15 attack classes
+
+#### `client.py`
+Flower-based federated learning client:
+- `IDSClient`: Extends `fl.client.NumPyClient`
+  - `get_parameters()`: Extract model weights
+  - `set_parameters()`: Update from global model
+  - `fit()`: Local training
+  - `evaluate()`: Validation on local data
+- `create_client()`: Factory function for client instantiation
+
+**Integration**: Seamlessly integrates with Flower framework for federated orchestration
+
+#### `server.py`
+Flower-based federated learning server:
+- `weighted_average()`: Aggregates client metrics by dataset size
+- `create_fedavg_strategy()`: Creates FedAvg strategy
+- `MetricsLogger`: Tracks metrics across rounds and saves to JSON
+- `run_server()`: Main server orchestration
+
+**Features**: Metrics aggregation, round logging, JSON persistence
+
+#### `strategies.py`
+Multiple federated learning aggregation strategies:
+
+1. **FedAvg** (Baseline)
+   - Standard weighted averaging
+   - Paper: McMahan et al., 2017
+   
+2. **FedProx** (Heterogeneous Networks)
+   - Adds proximal regularization: `loss + (mu/2) * ||w - w_global||²`
+   - Better convergence on non-IID data
+   - Paper: Li et al., ICML 2020
+   - Config: `mu` (default 0.01)
+   
+3. **FedNova** (Non-IID Optimization)
+   - Normalized gradient updates
+   - Momentum-accelerated aggregation
+   - Handles varying local epochs/dataset sizes
+   - Paper: Wang et al., 2021
+   - Config: `adapt_lr`, `momentum`
+   
+4. **DPFedAvg** (Differential Privacy)
+   - Server-side Gaussian DP: clipping + noise injection
+   - Privacy budget tracking via Opacus RDPAccountant
+   - Paper: Abadi et al., 2016
+   - Config: `max_grad_norm`, `noise_multiplier`, `target_delta`
+
+**Factory**: `create_strategy(strategy_name, **kwargs)` for unified interface
+
+#### `evaluate.py`
+Evaluation utilities:
+- Classification metrics (accuracy, precision, recall, F1)
+- Per-class performance analysis
+- Confusion matrix computation
+- Macro and weighted averaging
+
+#### `visualize.py`
+Visualization functions:
+- Convergence curves (loss, accuracy)
+- Metrics comparison
+- Client data distribution
+- Per-class performance plots
+
+### Experiment Scripts (experiments/)
+
+- `run.py`: Universal Hydra-based experiment runner (main entry point)
+- `run_fedavg.py`: FedAvg baseline experiments
+- `run_fedprox.py`: FedProx heterogeneous network experiments
+- `run_fednova.py`: FedNova non-IID experiments
+- `run_dp.py`: DPFedAvg privacy experiments
+
+All scripts use Hydra for configuration management with command-line overrides.
+
+### Configuration Files (configs/)
+
+- `default.yaml`: Base configuration for all experiments
+- `heterogeneous.yaml`: Preset for high-heterogeneity scenarios
+- `privacy.yaml`: Preset for differential privacy experiments
+
+## Data Partitioning Strategies
+
+| Strategy | Partition | Heterogeneity | EMD | Use Case |
+|----------|-----------|---------------|-----|----------|
+| **IID** | Random shuffle | Low | 0.0068 | Baseline, privacy testing |
+| **Temporal** | Day-based | Medium | 0.0122 | Realistic network scenarios |
+| **Attack Family** | By attack type | High | 0.0785 | Non-IID stress testing |
+
+## Configuration Reference
+
+### Command-Line Overrides (Hydra Dot Notation)
+
 ```bash
-python experiments/run_baseline.py \
-    --data_dir data/processed \
-    --output_dir results \
-    --epochs 50 \
-    --batch_size 32 \
-    --learning_rate 0.01
+# Data configuration
+data.partition=day              # iid | day | family
+data.n_clients=10              # Number of clients
+data.seed=42                   # Random seed
+
+# Training configuration
+training.local_epochs=5        # Local epochs per round
+training.batch_size=256        # Batch size
+training.learning_rate=0.001   # Adam learning rate
+training.num_rounds=100        # Total federated rounds
+training.device=cuda           # cpu | cuda | auto
+
+# Strategy configuration
+strategy.name=fedprox          # fedavg | fedprox | fednova | dpfedavg
+strategy.mu=0.01              # FedProx: proximal coefficient
+strategy.noise_multiplier=1.0  # DPFedAvg: noise std / clipping
+strategy.max_grad_norm=1.0     # DPFedAvg: clipping threshold
+strategy.momentum=0.9          # FedNova: momentum
+strategy.adapt_lr=true         # FedNova: adaptive LR
+
+# Experiment configuration
+experiment.name=my_exp         # Experiment name
+experiment.output_dir=results/metrics  # Output directory
+experiment.verbose=true        # Verbose logging
+experiment.seed=42             # Reproducibility
 ```
 
-#### FedAvg
+### Example Configurations
+
 ```bash
-python experiments/run_fedavg.py \
-    --data_dir data/processed \
-    --output_dir results \
-    --num_clients 10 \
-    --num_rounds 20 \
-    --local_epochs 5 \
-    --partition non-iid \
-    --alpha 0.1
+# IID, FedAvg (baseline)
+python experiments/run.py
+
+# Non-IID (family), FedProx with regularization
+python experiments/run.py data.partition=family strategy.name=fedprox strategy.mu=0.05
+
+# High heterogeneity with FedNova and momentum
+python experiments/run.py data.partition=family strategy.name=fednova strategy.momentum=0.9
+
+# Differential privacy with strong privacy
+python experiments/run.py strategy.name=dpfedavg strategy.noise_multiplier=0.1
+
+# Custom: 20 clients, 200 rounds, high learning rate
+python experiments/run.py data.n_clients=20 training.num_rounds=200 training.learning_rate=0.01
 ```
-
-#### FedProx
-```bash
-python experiments/run_fedprox.py \
-    --data_dir data/processed \
-    --output_dir results \
-    --num_clients 10 \
-    --num_rounds 20 \
-    --local_epochs 5 \
-    --mu 0.01
-```
-
-#### FedDP (with Differential Privacy)
-```bash
-python experiments/run_dp.py \
-    --data_dir data/processed \
-    --output_dir results \
-    --num_clients 10 \
-    --num_rounds 20 \
-    --epsilon 1.0 \
-    --delta 1e-5
-```
-
-### Option 2: Use Jupyter Notebooks
-
-1. **Exploratory Data Analysis**
-   ```bash
-   jupyter notebook notebooks/01_eda.ipynb
-   ```
-
-2. **Baseline Model Training**
-   ```bash
-   jupyter notebook notebooks/02_baseline.ipynb
-   ```
-
-3. **Federated Learning Demo**
-   ```bash
-   jupyter notebook notebooks/03_federation.ipynb
-   ```
-
-4. **Results Analysis**
-   ```bash
-   jupyter notebook notebooks/04_analysis.ipynb
-   ```
-
-## Module Documentation
-
-### `preprocess.py`
-Data preprocessing module with 7 main tasks:
-- **Task 1**: Load and merge 8 daily CSV files
-- **Task 2**: Remove infinite values in Flow_Bytes/s and Flow_Packets/s
-- **Task 3**: Remove duplicate rows
-- **Task 4**: Parse and unify timestamps
-- **Task 5**: Encode Attack_Type as integer labels
-- **Task 6**: Standard scale numeric features
-- **Task 7**: Save processed data as parquet
-
-### `dataset.py`
-Dataset management classes:
-- `CICIDSDataset`: Single dataset wrapper
-- `FederatedDataset`: Distributes data across clients (IID/Non-IID)
-- `DataLoader`: Batching utility
-- `load_processed_data()`: Load preprocessed parquet files
-
-### `model.py`
-Neural network implementations:
-- `NeuralNetwork`: Feedforward network with configurable hidden layers
-- `DeepNetwork`: Network with dropout capability
-- Forward pass, backward pass, and weight updates
-
-### `strategies.py`
-Aggregation strategies:
-- `FedAvg`: Weighted averaging of client weights
-- `FedProx`: Handles heterogeneous data with proximal term
-- `FedDP`: Differential privacy with Laplace noise
-- `StrategyFactory`: Factory for creating strategies
-
-### `client.py`
-Federated client implementation:
-- `FederatedClient`: Handles local training and evaluation
-- `ClientManager`: Manages multiple clients
-- Local model updates and client selection
-
-### `server.py`
-Federated server implementation:
-- `FederatedServer`: Coordinates federated learning rounds
-- Model aggregation and broadcasting
-- Global model evaluation and checkpointing
 
 ### `evaluate.py`
 Evaluation utilities:
@@ -304,49 +501,217 @@ See `requirements.txt` for all dependencies. Key packages:
 
 ## Troubleshooting
 
+### Virtual Environment Issues
+```bash
+# If activation fails
+source .venv/bin/activate  # Linux/Mac
+# or
+.venv\Scripts\activate.bat  # Windows
+
+# If still having issues, recreate environment
+rm -rf .venv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+```
+
+### Import Errors
+```bash
+# Ensure you're in the right directory
+cd /path/to/federated-ids
+
+# Check Python version
+python --version  # Should be 3.9+
+
+# Reinstall dependencies
+pip install -r requirements.txt --force-reinstall
+```
+
+### Data Processing Issues
+```bash
+# Verify data is in correct location
+ls data/raw/ | wc -l  # Should show 8 or 10 CSV files
+
+# Re-run preprocessing
+python src/preprocess.py
+
+# Check output
+ls data/processed/ | head -5
+```
+
 ### Out of Memory
-- Reduce batch size: `--batch_size 16`
-- Reduce number of clients: `--num_clients 5`
-- Process data in chunks
+```bash
+# Reduce batch size
+python experiments/run.py training.batch_size=256
+
+# Reduce number of clients
+python experiments/run.py data.n_clients=3
+
+# Reduce number of rounds
+python experiments/run.py training.num_rounds=20
+```
+
+### Hydra Configuration Issues
+```bash
+# View resolved configuration
+python experiments/run.py --cfg job
+
+# List all parameters
+python experiments/run.py --info=defaults
+
+# Check config directory
+ls -la configs/
+```
 
 ### Slow Training
-- Use fewer rounds: `--num_rounds 10`
-- Reduce local epochs: `--local_epochs 3`
-- Enable GPU acceleration (modify model.py)
+```bash
+# Use fewer clients and rounds for testing
+python experiments/run.py data.n_clients=2 training.num_rounds=5
 
-### Missing Data Files
-- Ensure all 8 CSV files are in `data/raw/`
-- Check file encoding (UTF-8 or Latin-1)
-- Verify column names match expected format
+# Reduce epochs
+python experiments/run.py training.local_epochs=1
+```
+
+## Project Layout
+
+```
+federated-ids/
+├── data/
+│   ├── raw/              # CICIDS2017 CSV files (place here)
+│   └── processed/        # Preprocessed parquet (auto-generated)
+├── src/                  # Core implementation
+│   ├── preprocess.py     # Data preprocessing
+│   ├── dataset.py        # Partitioning & dataloaders
+│   ├── model.py          # IDSNet neural network
+│   ├── client.py         # Flower client (NumPyClient)
+│   ├── server.py         # Flower server & aggregation
+│   ├── strategies.py     # FedAvg, FedProx, FedNova, DPFedAvg
+│   ├── evaluate.py       # Metrics computation
+│   └── visualize.py      # Plotting utilities
+├── experiments/          # Experiment runners
+│   ├── run.py            # Main Hydra entry point
+│   ├── run_fedavg.py     # FedAvg wrapper
+│   ├── run_fedprox.py    # FedProx wrapper
+│   ├── run_fednova.py    # FedNova wrapper
+│   ├── run_dp.py         # DPFedAvg wrapper
+│   └── README.md         # Detailed experiment guide
+├── configs/              # Hydra configuration files
+│   ├── default.yaml      # Base configuration
+│   ├── heterogeneous.yaml # High-heterogeneity preset
+│   ├── privacy.yaml      # Privacy preset
+│   └── README.md         # Configuration guide
+├── notebooks/            # Jupyter notebooks
+│   ├── 01_eda.ipynb
+│   ├── 02_baseline.ipynb
+│   ├── 03_federation.ipynb
+│   ├── 04_analysis.ipynb
+│   ├── 05_dataset_testing.ipynb
+│   └── 06_model_training.ipynb
+├── results/              # Experiment outputs
+│   ├── metrics/          # JSON results
+│   └── plots/            # Generated plots
+├── requirements.txt      # Python dependencies
+└── README.md             # This file
+```
+
+## Learning Resources
+
+### Federated Learning Papers
+- **FedAvg**: McMahan et al., ICML 2017 — "Communication-Efficient Learning of Deep Networks from Decentralized Data"
+- **FedProx**: Li et al., MLSys 2020 — "Federated Optimization in Heterogeneous Networks"
+- **FedNova**: Wang et al., ICLR 2021 — "Tackling the Objective Inconsistency Problem in Heterogeneous Federated Learning"
+
+### Differential Privacy
+- **Deep Learning with DP**: Abadi et al., CCS 2016
+- **Opacus**: Meta's differential privacy library (https://opacus.ai/)
+
+### Flower Framework
+- Documentation: https://flower.ai/
+- GitHub: https://github.com/adap/flower
+
+### CICIDS2017 Dataset
+- Paper: Sharafaldin et al., 2018 — "Toward Generating a Dataset for High Accuracy Intrusion Detection Systems"
+- Download: https://www.unb.ca/cic/datasets/ids-2017.html
+
+## Next Steps
+
+1. **Understand the Codebase**
+   - Review `src/dataset.py` for data partitioning concepts
+   - Study `src/model.py` for neural network architecture
+   - Explore `src/strategies.py` for aggregation algorithms
+
+2. **Run Experiments**
+   - Start with FedAvg baseline: `python experiments/run.py`
+   - Compare on non-IID data: `python experiments/run.py data.partition=family`
+   - Test different strategies systematically
+
+3. **Analyze Results**
+   - Results saved to `results/metrics/*.json`
+   - Use notebooks for visualization and analysis
+   - Compare strategy performance
+
+4. **Extend the Project**
+   - Add new strategies (FedProxFT, Scaffold, etc.)
+   - Implement client-side DP
+   - Add Byzantine-robust aggregation
+   - Integrate with real Flower gRPC servers
+   - Support model heterogeneity
 
 ## References
 
-### Federated Learning
-- McMahan, H. B., et al. "Communication-Efficient Learning of Deep Networks from Decentralized Data." ICML, 2017. (FedAvg)
-- Li, T., et al. "Federated optimization in heterogeneous networks." MLSys, 2020. (FedProx)
-
-### Differential Privacy
-- Dwork, C., & Roth, A. "The Algorithmic Foundations of Differential Privacy." FnT TCS, 2014.
+### Key Papers
+- McMahan, H. B., et al. "Communication-Efficient Learning of Deep Networks from Decentralized Data." ICML, 2017.
+- Li, T., et al. "Federated Optimization in Heterogeneous Networks." MLSys, 2020.
+- Wang, J., et al. "Tackling the Objective Inconsistency Problem in Heterogeneous Federated Learning." ICLR, 2021.
 - Abadi, M., et al. "Deep Learning with Differential Privacy." CCS, 2016.
+- Sharafaldin, I., et al. "Toward Generating a Dataset for High Accuracy Intrusion Detection Systems." CIC, 2018.
 
-### IDS/Intrusion Detection
-- Sharafaldin, I., et al. "Toward Generating a Dataset for High Accuracy Intrusion Detection Systems." 2018. (CICIDS2017)
+### Frameworks & Libraries
+- **Flower**: Federated Learning Framework (https://flower.ai/)
+- **Opacus**: Differential Privacy Library (https://opacus.ai/)
+- **PyTorch**: Deep Learning Framework (https://pytorch.org/)
 
-## Author
+## Citation
 
-Shailesh Kumar Sharma
+If you use this project, please cite:
+
+```bibtex
+@software{federated_ids_2026,
+  title={Federated Learning for Intrusion Detection System},
+  author={Shailesh Kumar Sharma},
+  year={2026},
+  url={https://github.com/yourusername/federated-ids}
+}
+```
 
 ## License
 
-MIT License
+MIT License - See LICENSE file for details
 
 ## Contributing
 
 Contributions welcome! Please:
 1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Commit changes: `git commit -am 'Add feature'`
+4. Push to branch: `git push origin feature/your-feature`
+5. Submit a pull request
 
-## Contact
+## Support
 
-For questions or issues, please open an GitHub issue or contact the maintainers.
+- 📖 Check [experiments/README.md](experiments/README.md) for experiment documentation
+- ⚙️ Check [configs/README.md](configs/README.md) for configuration help
+- 🐍 Run `python experiments/run.py --help` for Hydra help
+- 📝 Review notebooks for examples
+
+## Changelog
+
+### v1.0 (Current)
+- ✅ Flower-based federated learning framework
+- ✅ Four aggregation strategies (FedAvg, FedProx, FedNova, DPFedAvg)
+- ✅ Three data partitioning strategies (IID, Temporal, Attack Family)
+- ✅ Hydra configuration management
+- ✅ Comprehensive metrics and evaluation
+- ✅ Privacy budget tracking (Opacus)
+- ✅ Jupyter notebooks for exploration and analysis
