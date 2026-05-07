@@ -48,6 +48,11 @@ venv.bak/
 
 # IDEs
 .vscode/
+
+# Environment files
+.env
+.env.local
+.env.*.local
 .idea/
 *.swp
 *.swo
